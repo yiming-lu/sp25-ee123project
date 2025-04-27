@@ -1,0 +1,21 @@
+import sympy as sp
+
+# 定义符号
+t = sp.symbols('t', real=True)
+A1, A2, a, b, phi = sp.symbols('A1 A2 a b phi', real=True)
+a2, a3, a4 = sp.symbols('a2 a3 a4', real=True)
+
+# 定义 x(t)
+x = A1 * sp.cos(a * t + phi) + A2 * sp.cos(b * t)
+
+# 定义 y = a2*x^2 + a3*x^4 + a4*x^5
+y = a2 * x**2 + a3 * x**3 + a4 * x**4
+
+# 可选：化简或展开表达式
+y_expanded = sp.expand(y)
+
+# 输出表达式
+print("x(t) =")
+sp.pprint(x)
+print("\ny(t) =")
+sp.pprint(y_expanded)
