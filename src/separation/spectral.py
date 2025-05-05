@@ -1,128 +1,85 @@
-# src/separation/ica_spectral.py
-
-import os
-import sys
-# —— 把项目的 src/ 根目录加入 Python 模块搜索路径 ——
-_script_dir = os.path.dirname(__file__)
-_src_dir = os.path.abspath(os.path.join(_script_dir, '..'))
-if _src_dir not in sys.path:
-    sys.path.insert(0, _src_dir)
-
 import numpy as np
-import matplotlib.pyplot as plt
-import soundfile as sf
 import librosa
-from sklearn.cluster import SpectralClustering
+from scipy.signal import stft, istft
+from sklearn.cluster import KMeans
+import soundfile as sf
 from mir_eval.separation import bss_eval_sources
-from scipy.signal import correlate
-from stft_utils import stft
 
-def main():
-    # 1) 读取两段干净语音
-    s1, sr1 = librosa.load(librosa.example('libri1'), duration=5.0)
-    s2, sr2 = librosa.load(librosa.example('libri2'), duration=5.0)
-    assert sr1 == sr2, "采样率必须一致"
+# 参数配置
+n_fft = 2048
+hop_length = 512
+win_length = n_fft
+
+def duet_separation(mix, sr):
+    """DUET语音分离主函数"""
+    assert mix.ndim == 2 and mix.shape[0] == 2, "需要立体声输入"
+
+    # 左右声道STFT
+    _, _, Z_l = stft(mix[0], fs=sr, nperseg=win_length, noverlap=win_length-hop_length)
+    _, _, Z_r = stft(mix[1], fs=sr, nperseg=win_length, noverlap=win_length-hop_length)
+
+    # 计算幅度和相位
+    mag_l, mag_r = np.abs(Z_l), np.abs(Z_r)
+    phase_l, phase_r = np.angle(Z_l), np.angle(Z_r)
+
+    # 计算特征
+    a = mag_r / (mag_l + 1e-8)
+    delta = phase_r - phase_l
+    features = np.stack([a.flatten(),
+                        np.cos(delta).flatten(),
+                        np.sin(delta).flatten()], axis=1)
+
+    # K-means聚类
+    kmeans = KMeans(n_clusters=2, n_init=10).fit(features)
+    labels = kmeans.labels_.reshape(a.shape)
+
+    # 生成掩码并分离
+    masks = [(labels == i) for i in range(2)]
+    estimates = [istft(Z_l * mask, fs=sr, nperseg=win_length, 
+                      noverlap=win_length-hop_length)[1] for mask in masks]
+
+    # 统一长度并保存
+    min_len = min(len(e) for e in estimates)
+    return [e[:min_len] for e in estimates]
+
+def evaluate_sources(references, estimates, sr):
+    """评估分离质量"""
+    max_len = max(max(len(r) for r in references), max(len(e) for e in estimates))
+    
+    # 对齐长度（修复关键点）
+    references = [librosa.util.fix_length(r, size=max_len) for r in references]  # 正确使用size=
+    estimates = [librosa.util.fix_length(e, size=max_len) for e in estimates]    # 正确使用size=
+    
+    # 计算指标
+    return bss_eval_sources(np.array(references), np.array(estimates))
+
+if __name__ == "__main__":
+    # 1) 生成混合信号
+    # 加载示例音频（使用Librosa内置音频）
+    s1, sr = librosa.load(librosa.example('libri1'), duration=5.0)
+    s2, sr = librosa.load(librosa.example('libri2'), duration=5.0)
+    
     L = min(len(s1), len(s2))
     s1, s2 = s1[:L], s2[:L]
     sources = np.vstack([s1, s2])  # shape = (2, L)
 
-    # 2) 合成单通道混合
+    # 创建立体声混合矩阵
     A = np.array([[1.0, 0.5],
                   [0.5, 1.0]])
-    X = A @ sources                # (2, L)
-    mix = X.mean(axis=0)           # (L,)
+    X = A @ sources  # 立体声混合信号 shape (2, L)
 
-    # 3) 计算 STFT 和功率谱
-    n_fft = 1024
-    hop_length = 512
-    D = stft(mix, n_fft=n_fft, hop_length=hop_length)
-    power = np.abs(D) ** 2
-    phase = np.exp(1j * np.angle(D))
+    # 2) 进行分离
+    estimates = duet_separation(X, sr)
+    
+    # 保存结果
+    sf.write("estimated1.wav", estimates[0], sr)
+    sf.write("estimated2.wav", estimates[1], sr)
 
-    # 4) Spectral Clustering 分离
-    feats = np.log1p(power)
-    feats = (feats - feats.mean()) / feats.std()
-    X_feats = feats.T  # (frames, freqs)
-    clustering = SpectralClustering(
-        n_clusters=2,
-        affinity='nearest_neighbors',
-        n_neighbors=10,
-        assign_labels='kmeans',
-        random_state=0
-    )
-    labels = clustering.fit_predict(X_feats)
-
-    # 5) Wiener 掩码重构
-    Vs = []
-    for c in [0, 1]:
-        mask_frame = (labels == c).astype(float)  # (frames,)
-        Vc = power * mask_frame[np.newaxis, :]    # (freqs, frames)
-        Vs.append(Vc)
-    V_sum = np.sum(Vs, axis=0) + 1e-8
-
-    S_est = []
-    for Vc in Vs:
-        mask = Vc / V_sum
-        S_tf = mask * D
-        x_est = librosa.istft(S_tf, hop_length=hop_length, length=L)
-        S_est.append(x_est)
-    S_est = np.vstack(S_est)  # (2, L)
-
-    # 6) 评估
-    sdr, sir, sar, _ = bss_eval_sources(sources, S_est)
-    print("Spectral Clustering 分离评估：")
-    for idx, (d, i_, a) in enumerate(zip(sdr, sir, sar), 1):
-        print(f"  源 {idx}: SDR={d:.2f} dB, SIR={i_:.2f} dB, SAR={a:.2f} dB")
-
-    # 7.1) 时域波形
-    plt.figure(figsize=(12, 6))
-    names = ['Source1','Source2','Mixture','Est1','Est2']
-    signals = [s1, s2, mix, S_est[0], S_est[1]]
-    for i, (sig, name) in enumerate(zip(signals, names), 1):
-        plt.subplot(3, 2, i)
-        plt.plot(sig)
-        plt.title(name)
-        plt.tight_layout()
-    plt.show()
-
-    # 7.2) 频谱图
-    plt.figure(figsize=(10, 8))
-    items = [(mix, 'Mixture'), (S_est[0], 'Est Src1'), (S_est[1], 'Est Src2')]
-    for i, (sig, title) in enumerate(items, 1):
-        plt.subplot(3, 1, i)
-        D_sig = stft(sig, n_fft=n_fft, hop_length=hop_length)
-        plt.imshow(20*np.log10(np.abs(D_sig)+1e-6), origin='lower', aspect='auto')
-        plt.title(title)
-        plt.xlabel('Frame'); plt.ylabel('Freq bin')
-    plt.tight_layout()
-    plt.show()
-
-    # 7.3) 波形叠加图（两路源）
-    t = np.arange(L) / sr1
-    for idx, (orig, est) in enumerate(zip([s1, s2], S_est), 1):
-        plt.figure(figsize=(6, 3))
-        plt.plot(t, orig, label=f'Orig Src{idx}', alpha=0.7)
-        plt.plot(t, est, '--', label=f'Est Src{idx}')
-        plt.title(f'Overlay Source {idx}')
-        plt.xlabel('Time [s]'); plt.legend(); plt.tight_layout()
-        plt.show()
-
-    # 7.4) 互相关图（两路源）
-    for idx, (orig, est) in enumerate(zip([s1, s2], S_est), 1):
-        corr = correlate(est, orig, mode='full')
-        lags = np.arange(-L+1, L)
-        plt.figure(figsize=(6, 3))
-        plt.plot(lags, corr)
-        plt.title(f'Cross-correlation Source {idx}')
-        plt.xlabel('Lag [samples]'); plt.tight_layout()
-        plt.show()
-
-    # 8) 保存音频
-    out_dir = os.path.abspath(os.path.join(_src_dir, 'results', 'sc_separated'))
-    os.makedirs(out_dir, exist_ok=True)
-    sf.write(os.path.join(out_dir, 'SC_src1.wav'), S_est[0], sr1)
-    sf.write(os.path.join(out_dir, 'SC_src2.wav'), S_est[1], sr1)
-    print(f"分离结果已保存到 {out_dir}")
-
-if __name__ == '__main__':
-    main()
+    # 3) 评估结果
+    try:
+        sdr, sir, sar, perm = evaluate_sources([s1, s2], estimates, sr)
+        print(f"SDR: {sdr[perm[0]]:.2f} dB, {sdr[perm[1]]:.2f} dB")
+        print(f"SIR: {sir[perm[0]]:.2f} dB, {sir[perm[1]]:.2f} dB")
+        print(f"SAR: {sar[perm[0]]:.2f} dB, {sar[perm[1]]:.2f} dB")
+    except Exception as e:
+        print(f"评估失败: {str(e)}")
