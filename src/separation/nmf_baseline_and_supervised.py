@@ -1,6 +1,6 @@
 import os
 import sys
-# —— 把项目的 src/ 根目录加入 Python 模块搜索路径 ——
+
 _script_dir = os.path.dirname(__file__)
 _src_dir = os.path.abspath(os.path.join(_script_dir, '..'))
 if _src_dir not in sys.path:
@@ -62,7 +62,7 @@ def supervised_nmf(s1, s2, mix, L):
     R, T = W.shape[1], pmix.shape[1]
     H = np.random.rand(R, T)
     for _ in range(500):
-        # KL 更新
+        # KL 
         H *= (W.T @ (pmix / (W @ H + 1e-8))) / (W.T.sum(axis=1)[:,None] + 0.1)
     from scipy.ndimage import gaussian_filter1d
     H = gaussian_filter1d(H, sigma=1.0, axis=1)
@@ -98,7 +98,7 @@ if __name__ == '__main__':
 
     s1, sr1 = librosa.load(librosa.example('libri1'), duration=mix_duration)
     s2, sr2 = librosa.load(librosa.example('libri2'), duration=mix_duration)
-    assert sr1 == sr2, "采样率必须一致"
+    assert sr1 == sr2, "fs must be the same for both sources"
     L = min(len(s1), len(s2))
     s1, s2 = s1[:L], s2[:L]
     sources = np.vstack([s1, s2])
